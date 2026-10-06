@@ -3,8 +3,9 @@ import sqlite3
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
+import plotly.graph_objects as go
 import numpy as np
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 # 1. Page Configuration
 st.set_page_config(page_title="Personal Investment Dashboard", layout="wide")
@@ -163,7 +164,6 @@ def get_portfolio_data():
     port_df = port_df[port_df['Qty'] > 0].copy()
 
     if not port_df.empty:
-        # Separate normal tickers from Robo-Advisors
         yf_tickers = port_df[port_df['Category'] != 'Robo-Advisor']['Ticker'].unique()
         live_prices = {}
         
@@ -172,27 +172,122 @@ def get_portfolio_data():
                 live_prices[ticker] = fetch_live_price(ticker)
                 
         port_df['Live Price'] = port_df['Ticker'].map(live_prices)
-        
-        # Calculate Invested Value
         port_df['Invested Value'] = port_df['Qty'] * port_df['Avg Price']
         
-        # Calculate Current Value
         robo_mask = port_df['Category'] == 'Robo-Advisor'
         
-        # Normal assets
         port_df.loc[~robo_mask, 'Current Value'] = port_df.loc[~robo_mask, 'Qty'] * port_df.loc[~robo_mask, 'Live Price']
-        
-        # Robo assets
         port_df.loc[robo_mask, 'Current Value'] = port_df.loc[robo_mask, 'Manual_Value'].fillna(port_df.loc[robo_mask, 'Invested Value'])
         port_df.loc[robo_mask, 'Live Price'] = np.where(port_df.loc[robo_mask, 'Qty'] > 0, port_df.loc[robo_mask, 'Current Value'] / port_df.loc[robo_mask, 'Qty'], 0.0)
         
-        # Unrealised PnL
-        port_df['Unrealised PnL (€)'] = port_df['Current Value'] - port_df['Invested Value']
-        port_df['Unrealised PnL (%)'] = np.where(port_df['Invested Value'] > 0, (port_df['Unrealised PnL (€)'] / port_df['Invested Value']) * 100, 0.0)
+        port_df['Unrealised PnL (EUR)'] = port_df['Current Value'] - port_df['Invested Value']
+        port_df['Unrealised PnL (%)'] = np.where(port_df['Invested Value'] > 0, (port_df['Unrealised PnL (EUR)'] / port_df['Invested Value']) * 100, 0.0)
         
         port_df = port_df.round(2)
         
     return df, port_df, realised_pnl_total, total_dividends_overall, total_fees_overall
+
+# 3. Function to Calculate Historical Portfolio Growth
+@st.cache_data(ttl=3600)
+def get_portfolio_growth_df(raw_df):
+    if raw_df.empty:
+        return pd.DataFrame()
+        
+    df = raw_df.copy()
+    df['date_dt'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date_dt')
+    
+    start_date = df['date_dt'].min().date()
+    end_date = date.today()
+    
+    if start_date > end_date:
+        start_date = end_date
+        
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    
+    standard_txs = df[df['category'] != 'Robo-Advisor']
+    unique_tickers = [str(t).replace(" ", "").upper() for t in standard_txs['ticker'].unique() if t]
+    
+    hist_prices = {}
+    for ticker in unique_tickers:
+        try:
+            tk = yf.Ticker(ticker)
+            h = tk.history(start=start_date.strftime("%Y-%m-%d"), end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"))
+            if not h.empty and 'Close' in h.columns:
+                h.index = pd.to_datetime(h.index).tz_localize(None)
+                s = h['Close'].reindex(date_range)
+                s = s.ffill().bfill()
+                hist_prices[ticker] = s
+        except Exception:
+            pass
+
+    growth_data = []
+    
+    for current_dt in date_range:
+        sub_df = df[df['date_dt'] <= current_dt]
+        if sub_df.empty:
+            continue
+            
+        invested_tot = 0.0
+        current_val_tot = 0.0
+        holdings = {}
+        robo_vals = {}
+        
+        for _, row in sub_df.iterrows():
+            ticker = str(row['ticker']).replace(" ", "").upper() if row['ticker'] else ''
+            exchange = str(row['exchange']).strip() if row['exchange'] else 'Main'
+            action = row['action']
+            qty = float(row['quantity']) if row['quantity'] else 0.0
+            price = float(row['price']) if row['price'] else 0.0
+            trade_fee = float(row['fee']) if ('fee' in row and pd.notnull(row['fee'])) else 0.0
+            cat = row['category']
+            
+            key = (ticker, exchange)
+            if key not in holdings:
+                holdings[key] = {'qty': 0.0, 'cost': 0.0, 'cat': cat}
+                
+            if action == 'BUY':
+                holdings[key]['qty'] += qty
+                holdings[key]['cost'] += (qty * price) + trade_fee
+                invested_tot += (qty * price) + trade_fee
+                if cat == 'Robo-Advisor':
+                    robo_vals[key] = robo_vals.get(key, 0.0) + (qty * price)
+            elif action == 'SELL':
+                holdings[key]['qty'] -= qty
+                net_proceeds = (qty * price) - trade_fee
+                invested_tot -= net_proceeds
+                if cat == 'Robo-Advisor':
+                    robo_vals[key] = max(0.0, robo_vals.get(key, 0.0) - (qty * price))
+            elif action == 'FEE':
+                fee_amt = price if price > 0 else trade_fee
+                invested_tot += fee_amt
+            elif action == 'SYNC_VALUE':
+                if cat == 'Robo-Advisor':
+                    robo_vals[key] = price
+
+        for (ticker, exchange), item in holdings.items():
+            qty = item['qty']
+            if qty <= 0:
+                continue
+            cat = item['cat']
+            
+            if cat == 'Robo-Advisor':
+                current_val_tot += robo_vals.get((ticker, exchange), item['cost'])
+            else:
+                p_series = hist_prices.get(ticker)
+                if p_series is not None and current_dt in p_series.index and pd.notnull(p_series.loc[current_dt]):
+                    current_val_tot += qty * float(p_series.loc[current_dt])
+                else:
+                    current_val_tot += item['cost']
+                    
+        growth_data.append({
+            'Date': current_dt,
+            'Invested Capital': round(invested_tot, 2),
+            'Portfolio Value': round(current_val_tot, 2),
+            'Unrealised PnL': round(current_val_tot - invested_tot, 2)
+        })
+
+    return pd.DataFrame(growth_data)
 
 raw_df, port_df, total_realised, total_divs, total_fees = get_portfolio_data()
 
@@ -203,41 +298,79 @@ with tab1:
     if not port_df.empty:
         total_value = port_df['Current Value'].sum()
         total_invested = port_df['Invested Value'].sum()
-        total_unrealised = port_df['Unrealised PnL (€)'].sum()
+        total_unrealised = port_df['Unrealised PnL (EUR)'].sum()
         total_unrealised_pct = (total_unrealised / total_invested) * 100 if total_invested > 0 else 0.0
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Total Value", f"€{total_value:,.2f}")
-        col2.metric("Total Invested", f"€{total_invested:,.2f}")
-        col3.metric("Unrealised PnL", f"€{total_unrealised:,.2f}", f"{total_unrealised_pct:.2f}%")
+        col1.metric("Total Value", f"EUR {total_value:,.2f}")
+        col2.metric("Total Invested", f"EUR {total_invested:,.2f}")
+        col3.metric("Unrealised PnL", f"EUR {total_unrealised:,.2f}", f"{total_unrealised_pct:.2f}%")
         
         st.write("") # Spacer
         
         col4, col5, col6 = st.columns(3)
-        col4.metric("Realised PnL", f"€{total_realised:,.2f}")
-        col5.metric("Total Dividends", f"€{total_divs:,.2f}")
-        col6.metric("Total Fees", f"€{total_fees:,.2f}")
+        col4.metric("Realised PnL", f"EUR {total_realised:,.2f}")
+        col5.metric("Total Dividends", f"EUR {total_divs:,.2f}")
+        col6.metric("Total Fees", f"EUR {total_fees:,.2f}")
         st.markdown("---")
+
+        # Collapsible Historical Portfolio Growth Chart
+        with st.expander("Historical Portfolio Growth", expanded=True):
+            growth_df = get_portfolio_growth_df(raw_df)
+            
+            if not growth_df.empty:
+                fig_growth = go.Figure()
+                
+                fig_growth.add_trace(go.Scatter(
+                    x=growth_df['Date'],
+                    y=growth_df['Portfolio Value'],
+                    mode='lines',
+                    name='Portfolio Value (EUR)',
+                    line=dict(color='#00CC96', width=2.5),
+                    hovertemplate='<b>Date</b>: %{x|%Y-%m-%d}<br><b>Portfolio Value</b>: EUR %{y:,.2f}<extra></extra>'
+                ))
+                
+                fig_growth.add_trace(go.Scatter(
+                    x=growth_df['Date'],
+                    y=growth_df['Invested Capital'],
+                    mode='lines',
+                    name='Invested Capital (EUR)',
+                    line=dict(color='#636EFA', width=2, dash='dash'),
+                    hovertemplate='<b>Invested Capital</b>: EUR %{y:,.2f}<extra></extra>'
+                ))
+                
+                fig_growth.update_layout(
+                    margin=dict(t=20, b=20, l=10, r=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    xaxis_title="Date",
+                    yaxis_title="Amount (EUR)",
+                    hovermode="x unified"
+                )
+                st.plotly_chart(fig_growth, use_container_width=True)
+            else:
+                st.info("Add transactions to generate growth history.")
 
         col_chart, col_table = st.columns([1, 2])
 
         with col_chart:
-            st.subheader("Portfolio Allocation")
-            plot_df = port_df.dropna(subset=['Current Value'])
-            if not plot_df.empty and plot_df['Current Value'].sum() > 0:
-                fig = px.pie(plot_df, values='Current Value', names='Ticker', hover_data=['Exchange'], hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
-                fig.update_layout(margin=dict(t=0, b=0, l=0, r=0))
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.write("Add data to display allocation chart.")
+            # Collapsible Portfolio Allocation Chart
+            with st.expander("Portfolio Allocation", expanded=True):
+                plot_df = port_df.dropna(subset=['Current Value'])
+                if not plot_df.empty and plot_df['Current Value'].sum() > 0:
+                    fig = px.pie(plot_df, values='Current Value', names='Ticker', hover_data=['Exchange'], hole=0.4, color_discrete_sequence=px.colors.sequential.Teal)
+                    fig.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.write("Add data to display allocation chart.")
 
         with col_table:
-            st.subheader("Asset Details")
-            st.dataframe(
-                port_df[['Ticker', 'Exchange', 'Category', 'Qty', 'Avg Price', 'Live Price', 'Current Value', 'Unrealised PnL (€)', 'Unrealised PnL (%)', 'Dividends', 'Fees']], 
-                use_container_width=True, 
-                hide_index=True
-            )
+            # Collapsible Asset Details Table
+            with st.expander("Asset Details", expanded=True):
+                st.dataframe(
+                    port_df[['Ticker', 'Exchange', 'Category', 'Qty', 'Avg Price', 'Live Price', 'Current Value', 'Unrealised PnL (EUR)', 'Unrealised PnL (%)', 'Dividends', 'Fees']], 
+                    use_container_width=True, 
+                    hide_index=True
+                )
     else:
         st.info("Portfolio is empty. Add a new transaction from the sidebar.")
 
@@ -273,8 +406,8 @@ with tab2:
                 e_action = st.selectbox("Action", actions, index=e_act_idx)
                 
                 e_qty = st.number_input("Quantity", min_value=0.0, format="%.4f", value=float(selected_row['quantity']))
-                e_price = st.number_input("Price / Amount / Total Value (€)", min_value=0.01, format="%.2f", value=float(selected_row['price']))
-                e_fee = st.number_input("Fee (€)", min_value=0.0, format="%.2f", value=float(selected_row['fee']) if ('fee' in selected_row and pd.notnull(selected_row['fee'])) else 0.0)
+                e_price = st.number_input("Price / Amount / Total Value (EUR)", min_value=0.01, format="%.2f", value=float(selected_row['price']))
+                e_fee = st.number_input("Fee (EUR)", min_value=0.0, format="%.2f", value=float(selected_row['fee']) if ('fee' in selected_row and pd.notnull(selected_row['fee'])) else 0.0)
                 
                 edit_submit = st.form_submit_button("Update Transaction")
                 if edit_submit:
@@ -294,7 +427,7 @@ with tab2:
             st.markdown("### Delete Transaction")
             selected_del_id = st.selectbox("Select Transaction ID to Delete", tx_ids, key="del_sel")
             del_row = raw_df[raw_df['id'] == selected_del_id].iloc[0]
-            st.warning(f"Transaction to delete: {del_row['action']} {del_row['ticker']} ({del_row['quantity']} units @ €{del_row['price']}) on {del_row['date']}")
+            st.warning(f"Transaction to delete: {del_row['action']} {del_row['ticker']} ({del_row['quantity']} units @ EUR {del_row['price']}) on {del_row['date']}")
             
             if st.button("Delete Transaction", type="primary"):
                 conn = sqlite3.connect('portfolio.db')
@@ -316,8 +449,8 @@ with st.sidebar.form("add_transaction_form"):
     t_category = st.selectbox("Category", ["Stock", "Crypto", "ETF", "Robo-Advisor"])
     t_action = st.selectbox("Action", ["BUY", "SELL", "DIVIDEND", "FEE", "SYNC_VALUE"])
     t_qty = st.number_input("Quantity (for BUY/SELL)", min_value=0.0, format="%.4f", value=0.0)
-    t_price = st.number_input("Price / Amount / Total Value (€)", min_value=0.01, format="%.2f")
-    t_fee = st.number_input("Transaction Fee (€)", min_value=0.0, format="%.2f", value=0.0)
+    t_price = st.number_input("Price / Amount / Total Value (EUR)", min_value=0.01, format="%.2f")
+    t_fee = st.number_input("Transaction Fee (EUR)", min_value=0.0, format="%.2f", value=0.0)
     submit = st.form_submit_button("Add Transaction")
     
     if submit and t_ticker:
