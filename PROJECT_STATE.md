@@ -3,31 +3,23 @@
 ## Tech Stack
 - Python 3.x
 - Streamlit
-- SQLite (portfolio.db)
+- Database: 
+  - Main Branch: SQLite (portfolio.db)
+  - feature/cloud-deployment Branch: Turso Cloud DB (libsql-client)
 - Plotly (Express & Graph Objects)
+- Pandas & NumPy
 - yfinance
 
-## Operational Guidelines & Rules
-- OS Environment: Windows (NO emojis in UI text to avoid UTF-8 console/editor encoding issues).
-- Layout: Clean UI using tabs (st.tabs) and expandable sections (st.expander).
-- Database Security: Local storage using portfolio.db (ignored in .gitignore).
+## Active Branches
+1. **main**: The stable, local-only version (SQLite).
+2. **feature/cloud-deployment**: Cloud-ready version with Turso DB integration and st.secrets authentication. Deployed to Streamlit Community Cloud for testing.
 
-## Database Schema (transactions table)
-- id (INTEGER PRIMARY KEY AUTOINCREMENT)
-- date (TEXT YYYY-MM-DD)
-- ticker (TEXT)
-- category (Stock, Crypto, ETF, Robo-Advisor)
-- exchange (TEXT)
-- action (BUY, SELL, DIVIDEND, FEE, SYNC_VALUE)
-- quantity (REAL)
-- price (REAL)
-- fee (REAL)
+## Security & Secrets
+- `APP_PASSWORD`: Used for a custom login screen on the Cloud branch.
+- `TURSO_URL` & `TURSO_AUTH_TOKEN`: Used for Cloud DB connection.
+- All secrets are managed locally via `.streamlit/secrets.toml` and safely ignored by `.gitignore`.
 
-## Completed Features
-1. Multi-asset & Multi-broker portfolio tracking.
-2. Realised PnL, Dividends, and Fees calculation.
-3. Live market data fetching via yfinance with multi-tier fallback logic.
-4. Interactive Portfolio Allocation Pie Chart.
-5. Historical Portfolio Growth Line Chart (Invested Capital vs Portfolio Value).
-6. Full Transaction CRUD (Add, Edit, Delete).
-7. Collapsible UI sections using st.expander.
+## Upcoming Tasks (Next Session)
+1. **Performance Optimization (Cloud Branch)**: Address the slow loading times caused by `yfinance` network calls and Turso HTTP requests by implementing Streamlit's `@st.cache_data` (TTL caching) for both live price fetching and raw transaction fetching.
+2. Ensure cache is cleared appropriately upon any CRUD (Add/Edit/Delete) operation.
+3. Evaluate the cloud testing period and decide whether to merge `feature/cloud-deployment` into `main`.
