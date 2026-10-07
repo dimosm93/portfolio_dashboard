@@ -73,7 +73,8 @@ def get_portfolio_data():
             action TEXT,
             quantity REAL,
             price REAL,
-            fee REAL DEFAULT 0.0
+            fee REAL DEFAULT 0.0,
+            foreign_tax REAL DEFAULT 0.0
         )
     ''')
     
@@ -84,6 +85,9 @@ def get_portfolio_data():
         conn.commit()
     if 'fee' not in columns:
         cursor.execute("ALTER TABLE transactions ADD COLUMN fee REAL DEFAULT 0.0")
+        conn.commit()
+    if 'foreign_tax' not in columns:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN foreign_tax REAL DEFAULT 0.0")
         conn.commit()
         
     df = pd.read_sql_query("SELECT * FROM transactions", conn)
@@ -289,17 +293,223 @@ def get_portfolio_growth_df(raw_df):
 
     return pd.DataFrame(growth_data)
 
+# 4. Function to Calculate Annual Performance Summary
+def get_annual_performance_df(growth_df):
+    if growth_df.empty:
+        return pd.DataFrame()
+        
+    df = growth_df.copy()
+    df['Year'] = pd.to_datetime(df['Date']).dt.year
+    current_year = date.today().year
+    
+    annual_rows = []
+    prev_unrealised = 0.0
+    prev_val = 0.0
+    prev_inv = 0.0
+    
+    for y, group in df.groupby('Year'):
+        last_row = group.iloc[-1]
+        curr_val = float(last_row['Portfolio Value'])
+        curr_inv = float(last_row['Invested Capital'])
+        curr_unrealised = float(last_row['Unrealised PnL'])
+        
+        yoy_unrealised_change = curr_unrealised - prev_unrealised
+        net_injected = curr_inv - prev_inv
+        start_base = prev_val + net_injected
+        yoy_return_pct = ((curr_val - start_base) / start_base * 100) if start_base > 0 else 0.0
+        
+        year_label = str(y) if y < current_year else f"{y} (YTD)"
+        
+        annual_rows.append({
+            'Year': year_label,
+            'Portfolio Value (EUR)': round(curr_val, 2),
+            'Invested Capital (EUR)': round(curr_inv, 2),
+            'End-of-Year Unrealised PnL (EUR)': round(curr_unrealised, 2),
+            'YoY Unrealised Change (EUR)': round(yoy_unrealised_change, 2),
+            'YoY Return (%)': round(yoy_return_pct, 2)
+        })
+        
+        prev_unrealised = curr_unrealised
+        prev_val = curr_val
+        prev_inv = curr_inv
+        
+    return pd.DataFrame(annual_rows)
+
+# Helper function to get cumulative totals up to a specific year
+def get_snapshot_totals(raw_df, snapshot_year):
+    if raw_df.empty:
+        return 0.0, 0.0, 0.0
+    
+    df = raw_df.copy()
+    df['date_dt'] = pd.to_datetime(df['date'])
+    df = df[df['date_dt'].dt.year <= snapshot_year].sort_values('date_dt')
+    
+    portfolio = {}
+    realised_pnl = 0.0
+    dividends = 0.0
+    fees = 0.0
+    
+    for _, row in df.iterrows():
+        ticker = str(row['ticker']).replace(" ", "").upper() if row['ticker'] else ''
+        exchange = str(row['exchange']).strip() if row['exchange'] else 'Main'
+        action = row['action']
+        qty = float(row['quantity']) if row['quantity'] else 0.0
+        price = float(row['price']) if row['price'] else 0.0
+        trade_fee = float(row['fee']) if ('fee' in row and pd.notnull(row['fee'])) else 0.0
+        
+        key = (ticker, exchange)
+        if key not in portfolio:
+            portfolio[key] = {'qty': 0.0, 'avg_price': 0.0}
+        p = portfolio[key]
+        
+        if action == 'BUY':
+            total_cost = (p['qty'] * p['avg_price']) + (qty * price) + trade_fee
+            p['qty'] += qty
+            p['avg_price'] = total_cost / p['qty'] if p['qty'] > 0 else 0.0
+            fees += trade_fee
+        elif action == 'SELL':
+            net_proceeds = (qty * price) - trade_fee
+            profit = net_proceeds - (qty * p['avg_price'])
+            realised_pnl += profit
+            p['qty'] -= qty
+            fees += trade_fee
+        elif action == 'DIVIDEND':
+            div_amount = price if price > 0 else (qty * price)
+            dividends += div_amount
+        elif action == 'FEE':
+            fee_amount = price if price > 0 else trade_fee
+            fees += fee_amount
+            
+    return realised_pnl, dividends, fees
+
+# 5. Function to Calculate Tax / E1 Declaration Values
+def get_tax_e1_data(raw_df, selected_year):
+    if raw_df.empty:
+        return 0.0, 0.0, 0.0, 0.0, pd.DataFrame()
+
+    df = raw_df.copy()
+    df['date_dt'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date_dt')
+
+    portfolio_state = {}
+    code_743_purchases = 0.0
+    code_659_realised_gains = 0.0
+    code_659_dividends_gross = 0.0
+    foreign_tax_total = 0.0
+    
+    year_records = []
+
+    for index, row in df.iterrows():
+        tx_year = row['date_dt'].year
+        ticker = str(row['ticker']).replace(" ", "").upper() if row['ticker'] else ''
+        exchange = str(row['exchange']).strip() if row['exchange'] else 'Main'
+        action = row['action']
+        qty = float(row['quantity']) if row['quantity'] else 0.0
+        price = float(row['price']) if row['price'] else 0.0
+        trade_fee = float(row['fee']) if ('fee' in row and pd.notnull(row['fee'])) else 0.0
+        foreign_tax = float(row['foreign_tax']) if ('foreign_tax' in row and pd.notnull(row['foreign_tax'])) else 0.0
+        
+        key = (ticker, exchange)
+        if key not in portfolio_state:
+            portfolio_state[key] = {'qty': 0.0, 'avg_price': 0.0}
+
+        state = portfolio_state[key]
+
+        if action == 'BUY':
+            total_cost = (state['qty'] * state['avg_price']) + (qty * price) + trade_fee
+            state['qty'] += qty
+            state['avg_price'] = total_cost / state['qty'] if state['qty'] > 0 else 0.0
+            
+            if tx_year == selected_year:
+                purchase_amount = (qty * price) + trade_fee
+                code_743_purchases += purchase_amount
+                year_records.append({
+                    'Date': row['date'],
+                    'Asset': ticker,
+                    'Action': 'BUY',
+                    'Amount (EUR)': round(purchase_amount, 2),
+                    'E1 Code': '743 (Purchases)'
+                })
+
+        elif action == 'SELL':
+            net_proceeds = (qty * price) - trade_fee
+            profit = net_proceeds - (qty * state['avg_price'])
+            state['qty'] -= qty
+
+            if tx_year == selected_year:
+                code_659_realised_gains += profit
+                year_records.append({
+                    'Date': row['date'],
+                    'Asset': ticker,
+                    'Action': 'SELL',
+                    'Amount (EUR)': round(profit, 2),
+                    'E1 Code': '659/660 (Capital Gains)'
+                })
+
+        elif action == 'DIVIDEND':
+            if tx_year == selected_year:
+                div_gross = price if price > 0 else (qty * price)
+                code_659_dividends_gross += div_gross
+                foreign_tax_total += foreign_tax
+                year_records.append({
+                    'Date': row['date'],
+                    'Asset': ticker,
+                    'Action': 'DIVIDEND',
+                    'Amount (EUR)': round(div_gross, 2),
+                    'E1 Code': '295/296 (Gross) & 029/030 (Tax)'
+                })
+
+    details_df = pd.DataFrame(year_records)
+    return code_743_purchases, code_659_realised_gains, code_659_dividends_gross, foreign_tax_total, details_df
+
+# Load main data
 raw_df, port_df, total_realised, total_divs, total_fees = get_portfolio_data()
 
 # Navigation Tabs
-tab1, tab2 = st.tabs(["Dashboard", "Transaction Management"])
+tab1, tab2, tab3 = st.tabs(["Dashboard", "Transaction Management", "Tax / E1 Helper"])
 
 with tab1:
     if not port_df.empty:
-        total_value = port_df['Current Value'].sum()
-        total_invested = port_df['Invested Value'].sum()
-        total_unrealised = port_df['Unrealised PnL (EUR)'].sum()
-        total_unrealised_pct = (total_unrealised / total_invested) * 100 if total_invested > 0 else 0.0
+        growth_df = get_portfolio_growth_df(raw_df)
+        
+        # View Mode Selector (Live vs Historical Year Snapshot)
+        col_view, _ = st.columns([1, 2])
+        with col_view:
+            available_years = []
+            if not raw_df.empty:
+                available_years = sorted(pd.to_datetime(raw_df['date']).dt.year.unique(), reverse=True)
+            
+            view_mode = st.selectbox("Dashboard View Mode", ["Live / Current"] + [str(y) for y in available_years])
+            
+        if view_mode == "Live / Current":
+            total_value = port_df['Current Value'].sum()
+            total_invested = port_df['Invested Value'].sum()
+            total_unrealised = port_df['Unrealised PnL (EUR)'].sum()
+            total_unrealised_pct = (total_unrealised / total_invested) * 100 if total_invested > 0 else 0.0
+            
+            disp_realised = total_realised
+            disp_divs = total_divs
+            disp_fees = total_fees
+        else:
+            sel_year = int(view_mode)
+            if not growth_df.empty:
+                growth_df_temp = growth_df.copy()
+                growth_df_temp['Year'] = pd.to_datetime(growth_df_temp['Date']).dt.year
+                year_growth = growth_df_temp[growth_df_temp['Year'] <= sel_year]
+                
+                if not year_growth.empty:
+                    last_day = year_growth.iloc[-1]
+                    total_value = float(last_day['Portfolio Value'])
+                    total_invested = float(last_day['Invested Capital'])
+                    total_unrealised = float(last_day['Unrealised PnL'])
+                    total_unrealised_pct = (total_unrealised / total_invested) * 100 if total_invested > 0 else 0.0
+                else:
+                    total_value, total_invested, total_unrealised, total_unrealised_pct = 0.0, 0.0, 0.0, 0.0
+            else:
+                total_value, total_invested, total_unrealised, total_unrealised_pct = 0.0, 0.0, 0.0, 0.0
+                
+            disp_realised, disp_divs, disp_fees = get_snapshot_totals(raw_df, sel_year)
+            st.caption(f"Showing portfolio snapshot as of end of year **{sel_year}**")
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Value", f"EUR {total_value:,.2f}")
@@ -309,15 +519,21 @@ with tab1:
         st.write("") # Spacer
         
         col4, col5, col6 = st.columns(3)
-        col4.metric("Realised PnL", f"EUR {total_realised:,.2f}")
-        col5.metric("Total Dividends", f"EUR {total_divs:,.2f}")
-        col6.metric("Total Fees", f"EUR {total_fees:,.2f}")
+        col4.metric("Realised PnL", f"EUR {disp_realised:,.2f}")
+        col5.metric("Total Dividends", f"EUR {disp_divs:,.2f}")
+        col6.metric("Total Fees", f"EUR {disp_fees:,.2f}")
         st.markdown("---")
+
+        # Annual Performance Summary Table
+        with st.expander("Annual Performance Summary", expanded=True):
+            annual_perf_df = get_annual_performance_df(growth_df)
+            if not annual_perf_df.empty:
+                st.dataframe(annual_perf_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No sufficient historical data for annual performance summary.")
 
         # Collapsible Historical Portfolio Growth Chart
         with st.expander("Historical Portfolio Growth", expanded=True):
-            growth_df = get_portfolio_growth_df(raw_df)
-            
             if not growth_df.empty:
                 fig_growth = go.Figure()
                 
@@ -408,6 +624,7 @@ with tab2:
                 e_qty = st.number_input("Quantity", min_value=0.0, format="%.4f", value=float(selected_row['quantity']))
                 e_price = st.number_input("Price / Amount / Total Value (EUR)", min_value=0.01, format="%.2f", value=float(selected_row['price']))
                 e_fee = st.number_input("Fee (EUR)", min_value=0.0, format="%.2f", value=float(selected_row['fee']) if ('fee' in selected_row and pd.notnull(selected_row['fee'])) else 0.0)
+                e_ftax = st.number_input("Foreign Tax Paid (EUR)", min_value=0.0, format="%.2f", value=float(selected_row['foreign_tax']) if ('foreign_tax' in selected_row and pd.notnull(selected_row['foreign_tax'])) else 0.0)
                 
                 edit_submit = st.form_submit_button("Update Transaction")
                 if edit_submit:
@@ -415,9 +632,9 @@ with tab2:
                     cursor = conn.cursor()
                     cursor.execute('''
                         UPDATE transactions 
-                        SET date=?, ticker=?, category=?, exchange=?, action=?, quantity=?, price=?, fee=?
+                        SET date=?, ticker=?, category=?, exchange=?, action=?, quantity=?, price=?, fee=?, foreign_tax=?
                         WHERE id=?
-                    ''', (e_date.strftime("%Y-%m-%d"), e_ticker, e_category, e_exchange, e_action, e_qty, e_price, e_fee, selected_edit_id))
+                    ''', (e_date.strftime("%Y-%m-%d"), e_ticker, e_category, e_exchange, e_action, e_qty, e_price, e_fee, e_ftax, selected_edit_id))
                     conn.commit()
                     conn.close()
                     st.success(f"Transaction ID {selected_edit_id} updated successfully.")
@@ -440,7 +657,37 @@ with tab2:
     else:
         st.info("No recorded transactions in the database.")
 
-# 4. Sidebar Form for New Transactions
+with tab3:
+    st.subheader("Tax / E1 Declaration Helper")
+    
+    if not raw_df.empty:
+        raw_df_copy = raw_df.copy()
+        raw_df_copy['year_temp'] = pd.to_datetime(raw_df_copy['date']).dt.year
+        available_years = sorted(raw_df_copy['year_temp'].unique(), reverse=True)
+        
+        selected_tax_year = st.selectbox("Select Tax Year", available_years)
+        
+        c743, c659_gains, c659_divs, f_tax, tax_details_df = get_tax_e1_data(raw_df, selected_tax_year)
+        
+        st.markdown(f"### Tax Summary for Year **{selected_tax_year}**")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Code 743 (Purchases)", f"EUR {c743:,.2f}")
+        m2.metric("Code 659 (Realised Gains)", f"EUR {c659_gains:,.2f}")
+        m3.metric("Code 295/296 (Gross Dividends)", f"EUR {c659_divs:,.2f}")
+        m4.metric("Code 029/030 (Foreign Tax Paid)", f"EUR {f_tax:,.2f}")
+        
+        st.markdown("---")
+        st.markdown("### Transaction Breakdown for Tax Year")
+        
+        if not tax_details_df.empty:
+            st.dataframe(tax_details_df, use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No taxable events recorded for {selected_tax_year}.")
+    else:
+        st.info("No transactions available to generate tax report.")
+
+# 6. Sidebar Form for New Transactions
 st.sidebar.header("Add New Transaction")
 with st.sidebar.form("add_transaction_form"):
     t_date = st.date_input("Date", date.today())
@@ -451,14 +698,15 @@ with st.sidebar.form("add_transaction_form"):
     t_qty = st.number_input("Quantity (for BUY/SELL)", min_value=0.0, format="%.4f", value=0.0)
     t_price = st.number_input("Price / Amount / Total Value (EUR)", min_value=0.01, format="%.2f")
     t_fee = st.number_input("Transaction Fee (EUR)", min_value=0.0, format="%.2f", value=0.0)
+    t_ftax = st.number_input("Foreign Tax Paid (EUR) [For DIVIDEND]", min_value=0.0, format="%.2f", value=0.0)
     submit = st.form_submit_button("Add Transaction")
     
     if submit and t_ticker:
         conn = sqlite3.connect('portfolio.db')
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO transactions (date, ticker, category, exchange, action, quantity, price, fee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", 
-            (t_date.strftime("%Y-%m-%d"), t_ticker, t_category, t_exchange if t_exchange else 'Main', t_action, t_qty, t_price, t_fee)
+            "INSERT INTO transactions (date, ticker, category, exchange, action, quantity, price, fee, foreign_tax) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+            (t_date.strftime("%Y-%m-%d"), t_ticker, t_category, t_exchange if t_exchange else 'Main', t_action, t_qty, t_price, t_fee, t_ftax)
         )
         conn.commit()
         conn.close()
