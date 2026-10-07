@@ -1,3 +1,4 @@
 portfolio.db
 __pycache__/
 .ipynb_checkpoints/
+.streamlit/secrets.toml

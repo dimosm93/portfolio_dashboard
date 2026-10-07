@@ -1,15 +1,56 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 from datetime import date, datetime, timedelta
+import libsql_client
 
 # 1. Page Configuration
 st.set_page_config(page_title="Personal Investment Dashboard", layout="wide")
+
+# 2. Security / Authentication
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.title("Personal Investment Dashboard")
+        st.subheader("Authentication Required")
+        
+        with st.form("login_form"):
+            pwd = st.text_input("Enter Dashboard Password", type="password")
+            submit = st.form_submit_button("Login")
+            
+            if submit:
+                target_pwd = st.secrets.get("APP_PASSWORD", "1234")
+                if pwd == target_pwd:
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password.")
+        st.stop()
+
+check_password()
+
 st.title("Personal Investment Dashboard")
+
+# Database Helper Functions using Turso
+def get_turso_client():
+    url = st.secrets["TURSO_URL"]
+    token = st.secrets["TURSO_AUTH_TOKEN"]
+    if url.startswith("libsql://"):
+        url = url.replace("libsql://", "https://")
+    return libsql_client.create_client_sync(url=url, auth_token=token)
+
+def run_stmt(sql, params=None):
+    client = get_turso_client()
+    if params:
+        client.execute(sql, list(params))
+    else:
+        client.execute(sql)
+    client.close()
 
 # Helper function to fetch live price with multiple fallbacks
 def fetch_live_price(ticker):
@@ -58,12 +99,11 @@ def fetch_live_price(ticker):
 
     return np.nan
 
-# 2. Function to Load & Calculate Portfolio Data
+# 3. Function to Load & Calculate Portfolio Data
 def get_portfolio_data():
-    conn = sqlite3.connect('portfolio.db')
-    cursor = conn.cursor()
+    client = get_turso_client()
     
-    cursor.execute('''
+    client.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT,
@@ -78,20 +118,9 @@ def get_portfolio_data():
         )
     ''')
     
-    cursor.execute("PRAGMA table_info(transactions)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if 'exchange' not in columns:
-        cursor.execute("ALTER TABLE transactions ADD COLUMN exchange TEXT DEFAULT 'Main'")
-        conn.commit()
-    if 'fee' not in columns:
-        cursor.execute("ALTER TABLE transactions ADD COLUMN fee REAL DEFAULT 0.0")
-        conn.commit()
-    if 'foreign_tax' not in columns:
-        cursor.execute("ALTER TABLE transactions ADD COLUMN foreign_tax REAL DEFAULT 0.0")
-        conn.commit()
-        
-    df = pd.read_sql_query("SELECT * FROM transactions", conn)
-    conn.close()
+    rs = client.execute("SELECT * FROM transactions")
+    df = pd.DataFrame(rs.rows, columns=rs.columns)
+    client.close()
     
     if df.empty:
         return df, pd.DataFrame(), 0.0, 0.0, 0.0
@@ -191,7 +220,7 @@ def get_portfolio_data():
         
     return df, port_df, realised_pnl_total, total_dividends_overall, total_fees_overall
 
-# 3. Function to Calculate Historical Portfolio Growth
+# 4. Function to Calculate Historical Portfolio Growth
 @st.cache_data(ttl=3600)
 def get_portfolio_growth_df(raw_df):
     if raw_df.empty:
@@ -293,7 +322,7 @@ def get_portfolio_growth_df(raw_df):
 
     return pd.DataFrame(growth_data)
 
-# 4. Function to Calculate Annual Performance Summary
+# 5. Function to Calculate Annual Performance Summary
 def get_annual_performance_df(growth_df):
     if growth_df.empty:
         return pd.DataFrame()
@@ -382,7 +411,7 @@ def get_snapshot_totals(raw_df, snapshot_year):
             
     return realised_pnl, dividends, fees
 
-# 5. Function to Calculate Tax / E1 Declaration Values
+# 6. Function to Calculate Tax / E1 Declaration Values
 def get_tax_e1_data(raw_df, selected_year):
     if raw_df.empty:
         return 0.0, 0.0, 0.0, 0.0, pd.DataFrame()
@@ -628,15 +657,11 @@ with tab2:
                 
                 edit_submit = st.form_submit_button("Update Transaction")
                 if edit_submit:
-                    conn = sqlite3.connect('portfolio.db')
-                    cursor = conn.cursor()
-                    cursor.execute('''
+                    run_stmt('''
                         UPDATE transactions 
                         SET date=?, ticker=?, category=?, exchange=?, action=?, quantity=?, price=?, fee=?, foreign_tax=?
                         WHERE id=?
                     ''', (e_date.strftime("%Y-%m-%d"), e_ticker, e_category, e_exchange, e_action, e_qty, e_price, e_fee, e_ftax, selected_edit_id))
-                    conn.commit()
-                    conn.close()
                     st.success(f"Transaction ID {selected_edit_id} updated successfully.")
                     st.rerun()
 
@@ -647,11 +672,7 @@ with tab2:
             st.warning(f"Transaction to delete: {del_row['action']} {del_row['ticker']} ({del_row['quantity']} units @ EUR {del_row['price']}) on {del_row['date']}")
             
             if st.button("Delete Transaction", type="primary"):
-                conn = sqlite3.connect('portfolio.db')
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM transactions WHERE id=?", (selected_del_id,))
-                conn.commit()
-                conn.close()
+                run_stmt("DELETE FROM transactions WHERE id=?", (selected_del_id,))
                 st.success(f"Transaction ID {selected_del_id} deleted successfully.")
                 st.rerun()
     else:
@@ -687,7 +708,7 @@ with tab3:
     else:
         st.info("No transactions available to generate tax report.")
 
-# 6. Sidebar Form for New Transactions
+# 7. Sidebar Form for New Transactions
 st.sidebar.header("Add New Transaction")
 with st.sidebar.form("add_transaction_form"):
     t_date = st.date_input("Date", date.today())
@@ -702,13 +723,9 @@ with st.sidebar.form("add_transaction_form"):
     submit = st.form_submit_button("Add Transaction")
     
     if submit and t_ticker:
-        conn = sqlite3.connect('portfolio.db')
-        cursor = conn.cursor()
-        cursor.execute(
+        run_stmt(
             "INSERT INTO transactions (date, ticker, category, exchange, action, quantity, price, fee, foreign_tax) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
             (t_date.strftime("%Y-%m-%d"), t_ticker, t_category, t_exchange if t_exchange else 'Main', t_action, t_qty, t_price, t_fee, t_ftax)
         )
-        conn.commit()
-        conn.close()
         st.sidebar.success("Transaction added successfully.")
         st.rerun()
