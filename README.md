@@ -4,7 +4,7 @@ A comprehensive, Python-based local web application to track and analyze your pe
 
 **Privacy First:** This version runs entirely on your local machine. All financial data is stored locally in an SQLite database (`portfolio.db`) and never leaves your computer.
 
-## ✨ Key Features
+##  Key Features
 
 * **Multi-Asset Tracking:** Manage Stocks, ETFs, Crypto, and Robo-Advisors in one unified platform.
 * **Live Market Data:** Automatic live price fetching using `yfinance` with multi-tier fallback mechanisms.
@@ -29,12 +29,13 @@ A comprehensive, Python-based local web application to track and analyze your pe
 * **Database:** SQLite (Local `portfolio.db`)
 
 ## 🚀 Local Setup & Installation
-
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/yourusername/portfolio-dashboard.git](https://github.com/yourusername/portfolio-dashboard.git)
-   cd portfolio-dashboard
-   Install the required dependencies:
+   git clone [https://github.com/dimosm93/portfolio_dashboard.git](https://github.com/dimosm93/portfolio_dashboard.git)
+   cd portfolio_dashboard
+
+   
+Install the required dependencies: 
 Make sure you have Python installed, then run:
 
 Bash
