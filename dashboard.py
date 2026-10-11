@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import date, datetime, timedelta
 import libsql_client
+from data_processor import create_stock_dataframe
 
 # 1. Page Configuration
 st.set_page_config(page_title="Personal Investment Dashboard", layout="wide")
@@ -495,7 +496,8 @@ def get_tax_e1_data(raw_df, selected_year):
 raw_df, port_df, total_realised, total_divs, total_fees = get_portfolio_data()
 
 # Navigation Tabs
-tab1, tab2, tab3 = st.tabs(["Dashboard", "Transaction Management", "Tax / E1 Helper"])
+# Add the 4th tab for Stock Screener
+tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Transaction Management", "Tax / E1 Helper", "Stock Screener"])
 
 with tab1:
     if not port_df.empty:
@@ -729,3 +731,23 @@ with st.sidebar.form("add_transaction_form"):
         )
         st.sidebar.success("Transaction added successfully.")
         st.rerun()
+
+
+# Stock screener
+with tab4:
+    st.header("📈 Stock Screener & Fundamental Valuation")
+    st.markdown("Enter stock symbols separated by commas to perform fundamental evaluation:")
+
+    user_input = st.text_input("Tickers:", "AAPL, MSFT, NVDA, TSLA", key="screener_input")
+
+    if st.button("Run Screener", key="screener_btn"):
+        ticker_list = [symbol.strip().upper() for symbol in user_input.split(",") if symbol.strip()]
+
+        with st.spinner("Fetching financial metrics from Yahoo Finance..."):
+            df_screener = create_stock_dataframe(ticker_list)
+
+            if not df_screener.empty:
+                st.success(f"Successfully evaluated {len(df_screener)} stocks!")
+                st.dataframe(df_screener, use_container_width=True)
+            else:
+                st.error("No valid data retrieved. Please check the stock symbols.")
