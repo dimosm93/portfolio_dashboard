@@ -1,3 +1,4 @@
+Markdown
 # 📈 Personal Investment Dashboard
 
 A comprehensive, Python-based web application to track and analyze your personal investments across multiple brokers and asset classes. Built with Streamlit, it offers live market data fetching, historical growth tracking, built-in tax reporting helpers, and a standalone stock screening tool.
