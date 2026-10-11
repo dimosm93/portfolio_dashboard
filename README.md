@@ -30,10 +30,10 @@ A comprehensive, Python-based web application to track and analyze your personal
 
 To deploy this dashboard on the web using Streamlit Cloud and Turso DB:
 
-1. **GitHub Setup:** Push this repository to your own GitHub account.
+1. **GitHub Setup:** Push this repository to your GitHub account on the `main` branch.
 2. **Streamlit Cloud:** Go to [share.streamlit.io](https://share.streamlit.io) and click **"New app"**.
 3. **App Configuration:**
-   - Select your repository and set the branch to `main`.
+   - Select your repository (`portfolio_dashboard`) and set the branch to `main`.
    - Main file path: `dashboard.py`.
    - ⚠️ **Important:** Go to *Advanced Settings* and set the **Python version to 3.11** (required for `libsql-experimental` wheels to build correctly).
 4. **Environment Secrets:** 
@@ -41,27 +41,36 @@ To deploy this dashboard on the web using Streamlit Cloud and Turso DB:
    ```toml
    TURSO_DATABASE_URL = "libsql://[your-database-name].turso.io"
    TURSO_AUTH_TOKEN = "your-auth-token"
-   Click Deploy!
+   ```
+5. Click **Deploy!**
 
-🚀 Local Setup & Installation
+## 🚀 Local Setup & Installation
+
 If you prefer to run it locally for development:
 
-Clone the repository:
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/dimosm93/portfolio_dashboard.git
+   cd portfolio_dashboard
+   ```
 
-Bash
-git clone [https://github.com/dimosm93/portfolio_dashboard.git](https://github.com/dimosm93/portfolio_dashboard.git)
-cd portfolio_dashboard
-Install dependencies:
-Make sure you have Python 3.11 installed, then run:
+2. **Install dependencies:**
+   Make sure you have Python 3.11 installed, then run:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Bash
-pip install -r requirements.txt
-Local Secrets:
-Create a folder named .streamlit in the root directory and add a secrets.toml file with your Turso credentials (same as step 4 above).
+3. **Local Secrets:**
+   Create a folder named `.streamlit` in the root directory and add a `secrets.toml` file with your Turso credentials:
+   ```toml
+   TURSO_DATABASE_URL = "libsql://[your-database-name].turso.io"
+   TURSO_AUTH_TOKEN = "your-auth-token"
+   ```
 
-Run the application:
+4. **Run the application:**
+   ```bash
+   streamlit run dashboard.py
+   ```
 
-Bash
-streamlit run dashboard.py
-⚠️ Disclaimer
+## ⚠️ Disclaimer
 This software is provided for educational and informational purposes only. It does not constitute financial, investment, or tax advice. Always consult with a certified accountant for your tax declarations.
